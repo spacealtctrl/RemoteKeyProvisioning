@@ -193,8 +193,8 @@ public class SystemInterface {
 
         if (batchSize < RpcHardwareInfo.MIN_SUPPORTED_NUM_KEYS_IN_CSR) {
             Log.w(TAG, "HAL returned a batch size that's too small (" + batchSize
-                    + "), defaulting to " + RpcHardwareInfo.MIN_SUPPORTED_NUM_KEYS_IN_CSR);
-            return RpcHardwareInfo.MIN_SUPPORTED_NUM_KEYS_IN_CSR;
+                    + ") but use it anyway");
+            return batchSize;
         }
 
         if (batchSize > maxBatchSize) {
