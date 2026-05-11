@@ -1,0 +1,165 @@
+#!/system/bin/sh
+# FIXTEE — re-program TEE attestation keys from whichever keybox is
+# currently loaded in crDroid's built-in Tricky Store (Settings →
+# crDroid Settings → Misc → Tricky Store) or from a fallback file.
+#
+# Designed to be re-runnable. No `set -e`: we want to see WHY things
+# fail, not silently abort.
+#
+# Source: https://xdaforums.com/t/4773867/ (tongyuantongyu)
+
+VERSION="2026-05-10-r2"
+
+log() { echo "[FIXTEE] $*"; }
+err() { echo "[FIXTEE][!] $*" >&2; }
+
+log "v$VERSION"
+
+# --- Root check ----------------------------------------------------
+if [ "$(id -u)" != "0" ]; then
+    err "Must run as root. From Termux: su -c FIXTEE  (or: su, then FIXTEE)"
+    exit 1
+fi
+
+TEEFIX_DIR=/data/local/tmp/TEEFix
+BACKUP_DIR=/data/adb/teefix
+KEYBOX="$TEEFIX_DIR/keybox.xml"
+
+# --- Restore binaries from backup if /data/local/tmp got cleaned ---
+if [ ! -x "$TEEFIX_DIR/KmInstallKeybox" ] && [ -d "$BACKUP_DIR" ]; then
+    log "Restoring TEEFix binaries from $BACKUP_DIR"
+    mkdir -p "$TEEFIX_DIR"
+    cp "$BACKUP_DIR/KmInstallKeybox"     "$TEEFIX_DIR/" 2>/dev/null
+    cp "$BACKUP_DIR/libqtikeymaster4.so" "$TEEFIX_DIR/" 2>/dev/null
+    chmod 0755 "$TEEFIX_DIR/KmInstallKeybox" 2>/dev/null
+fi
+
+if [ ! -x "$TEEFIX_DIR/KmInstallKeybox" ] || [ ! -f "$TEEFIX_DIR/libqtikeymaster4.so" ]; then
+    err "Missing TEEFix binaries at $TEEFIX_DIR"
+    err "Expected: KmInstallKeybox + libqtikeymaster4.so"
+    err "Re-run host installer: tools/teefix/install.sh"
+    exit 1
+fi
+
+# --- Find a usable keybox ------------------------------------------
+# Order of preference:
+#   1. /sdcard/keybox.xml             (user-overridable)
+#   2. /data/adb/teefix/keybox.xml    (last known good, written below)
+#   3. settings get secure spoof_trickystore_keybox  (crDroid built-in)
+#   4. settings get system spoof_trickystore_keybox  (older crDroid)
+#   5. settings get global spoof_trickystore_keybox  (paranoid fallback)
+#   6. /data/user_de/0/com.android.settings/cache/keybox.xml
+#   7. /data/adb/tricky_store/keybox.xml             (Magisk Tricky Store)
+#   8. newest /data/media/0/Download/**/keybox*.xml  (last-resort)
+#
+# The chosen keybox is staged into $KEYBOX and ALSO cached at
+# /data/adb/teefix/keybox.xml so future runs survive setting wipes.
+#
+# Override on the command line with: FIXTEE /path/to/keybox.xml
+
+OVERRIDE="$1"
+SOURCE=""
+
+stage_from_file() {
+    src="$1"
+    [ -z "$src" ] && return 1
+    [ ! -s "$src" ] && return 1
+    mkdir -p "$TEEFIX_DIR"
+    cp "$src" "$KEYBOX" 2>/dev/null || return 1
+    chmod 0644 "$KEYBOX"
+    SOURCE="$src"
+    return 0
+}
+
+stage_from_setting() {
+    ns="$1"
+    val=$(settings get "$ns" spoof_trickystore_keybox 2>/dev/null)
+    [ -z "$val" ] && return 1
+    [ "$val" = "null" ] && return 1
+    # Strip whitespace and newlines defensively
+    val=$(printf '%s' "$val" | tr -d ' \r\n\t')
+    [ ${#val} -lt 100 ] && return 1   # too short to be a real keybox
+    mkdir -p "$TEEFIX_DIR"
+    printf '%s' "$val" | base64 -d > "$KEYBOX" 2>/dev/null
+    if [ ! -s "$KEYBOX" ]; then
+        rm -f "$KEYBOX"
+        return 1
+    fi
+    SOURCE="settings:$ns:spoof_trickystore_keybox"
+    return 0
+}
+
+if [ -n "$OVERRIDE" ]; then
+    log "Override: $OVERRIDE"
+    stage_from_file "$OVERRIDE" || { err "Override path unreadable: $OVERRIDE"; exit 1; }
+elif stage_from_file /sdcard/keybox.xml; then :
+elif stage_from_setting secure; then :
+elif stage_from_setting system; then :
+elif stage_from_setting global; then :
+elif stage_from_file /data/user_de/0/com.android.settings/cache/keybox.xml; then :
+elif stage_from_file /data/adb/tricky_store/keybox.xml; then :
+elif stage_from_file "$BACKUP_DIR/keybox.xml"; then :
+else
+    NEWEST=$(ls -1t /data/media/0/Download/keybox*.xml \
+                    /data/media/0/Download/*/keybox*.xml \
+                    /data/media/0/Download/Telegram/keybox*.xml 2>/dev/null | head -1)
+    if [ -n "$NEWEST" ] && stage_from_file "$NEWEST"; then :
+    else
+        err "No usable keybox found. Searched:"
+        err "  /sdcard/keybox.xml"
+        err "  settings (secure/system/global) spoof_trickystore_keybox"
+        err "  /data/user_de/0/com.android.settings/cache/keybox.xml"
+        err "  /data/adb/tricky_store/keybox.xml"
+        err "  $BACKUP_DIR/keybox.xml"
+        err "  /data/media/0/Download/**/keybox*.xml"
+        err
+        err "Options:"
+        err "  - Import keybox via Settings → crDroid Settings → Misc → Tricky Store"
+        err "  - Or put a keybox at /sdcard/keybox.xml"
+        err "  - Or pass a path:  FIXTEE /path/to/keybox.xml"
+        exit 2
+    fi
+fi
+
+if ! grep -q '<Keybox' "$KEYBOX" 2>/dev/null; then
+    err "Staged file does not look like a keybox XML (no <Keybox tag)."
+    err "Source: $SOURCE"
+    err "First bytes:"
+    head -c 200 "$KEYBOX" >&2; echo >&2
+    exit 3
+fi
+
+SIZE=$(wc -c < "$KEYBOX" 2>/dev/null)
+DEVID=$(grep -o 'DeviceID="[^"]*"' "$KEYBOX" | head -1 | sed 's/DeviceID="//; s/"$//')
+[ -z "$DEVID" ] && DEVID="@XposedHook"
+
+log "Keybox source: $SOURCE"
+log "Keybox file:   $KEYBOX ($SIZE bytes, DeviceID=$DEVID)"
+
+# Cache last-known-good for next run, regardless of where it came from
+mkdir -p "$BACKUP_DIR"
+cp "$KEYBOX" "$BACKUP_DIR/keybox.xml" 2>/dev/null
+
+# --- Run KmInstallKeybox -------------------------------------------
+log "Running KmInstallKeybox..."
+cd "$TEEFIX_DIR" || { err "Cannot cd to $TEEFIX_DIR"; exit 4; }
+
+OUT=$(LD_PRELOAD=./libqtikeymaster4.so ./KmInstallKeybox keybox.xml "$DEVID" true rkp 2>&1)
+RC=$?
+
+echo "$OUT"
+
+# KmInstallKeybox returns 0 on success and prints "InstallKeybox is done!"
+if echo "$OUT" | grep -q "InstallKeybox is done"; then
+    log "TEE programmed successfully."
+    log "Reboot now, connect to Internet, wait ~10s for RKP to fetch fresh keys."
+    log "If KeyAttestation still fails: run FIXTEE again, then reboot a 2nd time."
+    exit 0
+fi
+
+err "KmInstallKeybox did not report success (exit=$RC)."
+err "Output captured above. Common causes:"
+err "  - keybox missing real RSA key (only ECDSA real) — works for some apps"
+err "  - TEE in bad state from prior run — try one reboot, then FIXTEE again"
+err "  - vendor lib mismatch — re-push tools/teefix/libqtikeymaster4.so"
+exit $RC
