@@ -144,7 +144,7 @@ cp "$KEYBOX" "$BACKUP_DIR/keybox.xml" 2>/dev/null
 log "Running KmInstallKeybox..."
 cd "$TEEFIX_DIR" || { err "Cannot cd to $TEEFIX_DIR"; exit 4; }
 
-OUT=$(LD_PRELOAD=./libqtikeymaster4.so ./KmInstallKeybox keybox.xml "$DEVID" true rkp 2>&1)
+OUT=$(LD_PRELOAD=./libqtikeymaster4.so ./KmInstallKeybox keybox.xml "$DEVID" false rkp 2>&1)
 RC=$?
 
 echo "$OUT"
